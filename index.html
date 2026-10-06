@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>図形描画の記録</title>
+<style>
+  html, body { margin: 0; padding: 0; font-family: sans-serif; background: #f4f4f4; }
+  header { padding: 8px 12px; background: #fff; border-bottom: 1px solid #ddd; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  header label { font-size: 14px; }
+  header input { font-size: 14px; padding: 4px 6px; width: 120px; }
+  button { font-size: 15px; padding: 8px 14px; margin: 2px; }
+  #canvasWrap { padding: 12px; }
+  canvas {
+    display: block; width: 100%; max-width: 640px; aspect-ratio: 1 / 1; height: auto;
+    background: #fff; border: 1px solid #999; touch-action: none; /* iPadでスクロールさせない */
+    -webkit-user-select: none; user-select: none;
+  }
+  #actions { display: flex; gap: 8px; align-items: center; padding: 0 12px 12px; max-width: 664px; }
+  #status { font-size: 13px; color: #555; padding: 0 12px 12px; }
+</style>
+</head>
+<body>
+
+<header>
+  <label>参加者ID <input id="participantId" value="P01"></label>
+  <label>試行 <input id="trialId" type="number" value="1" min="1" style="width:70px"></label>
+  <label>条件 <select id="condSelect">
+    <option value="1">①</option><option value="2">②</option><option value="3">③</option>
+    <option value="4">④</option><option value="5">⑤</option><option value="6">⑥</option>
+    <option value="7">⑦</option><option value="8">⑧</option><option value="9">⑨</option>
+    <option value="10">⑩</option><option value="11">⑪</option><option value="12">⑫</option>
+    <option value="13">⑬</option><option value="14">⑭</option><option value="15">⑮</option>
+    <option value="16">⑯</option><option value="17">⑰</option><option value="18">⑱</option>
+    <option value="19">⑲</option>
+  </select></label>
+  <button id="clearBtn" style="margin-left:16px; color:#a00; border-color:#a00;">✕ 描き直す（全消去）</button>
+  <button id="backBtn">✎ 前の図を編集</button>
+  <button id="exportBtn" style="margin-left:auto;">⬇ ファイルの書き出し</button>
+</header>
+
+<div id="canvasWrap">
+  <canvas id="pad" width="800" height="800"></canvas>
+</div>
+
+<div id="actions">
+  <button id="undoBtn">↩ 直前の線を消す</button>
+  <button id="saveBtn" style="margin-left:auto;">次へ →</button>
+</div>
+
+<div id="status">線を描いてください。</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById("pad");
+  const ctx = canvas.getContext("2d");
+  const statusEl = document.getElementById("status");
+  const participantInput = document.getElementById("participantId");
+  const trialInput = document.getElementById("trialId");
+  const condSelect = document.getElementById("condSelect");
+
+  // ---- 参加者ごとの記録 ----
+  // records = { "P01": { participantId: "P01", trials: [ {trialId, condition, savedAt, canvas, strokes}, ... ] }, ... }
+  // ブラウザのlocalStorageにも残すので、ページを再読み込みしても消えない（iPadの設定でサイトデータが消えると失われるので、定期的に書き出す）
+  const STORAGE_KEY = "drawingRecords_v1";
+
+  function loadRecords() {
+    try {
+      return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function saveRecords() {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
+    } catch (e) {
+      statusEl.textContent = "ブラウザに保存できませんでした。書き出しで必ず保存してください。";
+    }
+  }
+
+  let records = loadRecords();
+
+  function currentParticipant() {
+    return participantInput.value.trim() || "unknown";
+  }
+
+  function ensureParticipant(pid) {
+    if (!records[pid]) records[pid] = { participantId: pid, trials: [] };
+    return records[pid];
+  }
+
+  // 参加者の既存の試行の次の番号を、試行の入力欄に入れる
+  function nextTrialFor(pid) {
+    const trials = ensureParticipant(pid).trials;
+    const maxTrial = trials.reduce((m, t) => Math.max(m, t.trialId), 0);
+    return maxTrial + 1;
+  }
+
+  function describeParticipant(pid) {
+    const n = ensureParticipant(pid).trials.length;
+    return `${pid}: 保存済み ${n} 試行`;
+  }
+
+  // ---- 描画 ----
+  // 1試行の記録: strokes = [ { pointerType, points: [{x,y,p,t}, ...], closed, gapPx }, ... ]
+  // x,y は 0〜1 に正規化した座標（キャンバスサイズに依存しないように保存する）
+  // t は試行開始からの経過ミリ秒, p は筆圧（マウス・指は0.5固定扱い）
+  let strokes = [];
+  let current = null;
+  let startTime = performance.now();
+
+  function resetStartTime() { startTime = performance.now(); }
+
+  // 始点と終点の距離（キャンバス上のpx）がこの値以下なら「囲めた」とみなす
+  const CLOSE_THRESHOLD_PX = 40;
+  const FILL_COLOR = "rgba(255, 140, 0, 0.35)";
+  const STROKE_COLOR = "#0050D0";
+  const STROKE_WIDTH_RATIO = 0.008; // キャンバス幅の0.8%（1600pxなら約13px）
+
+  // 点列をキャンバス上の経路としてなぞる（closedなら始点に戻して閉じる）
+  function tracePath(points, closed) {
+    ctx.beginPath();
+    ctx.moveTo(points[0].x * canvas.width, points[0].y * canvas.height);
+    for (let i = 1; i < points.length; i++) {
+      ctx.lineTo(points[i].x * canvas.width, points[i].y * canvas.height);
+    }
+    if (closed) ctx.closePath();
+  }
+
+  // 条件ごとの背景画像（backgrounds/cond01.png 〜 cond09.png）
+  let bgImg = null;
+
+  // 撮影した条件の数（StimulusCapture: 19条件）
+  const CONDITION_COUNT = 19;
+
+  // 試行番号から、既定の条件番号を決める（1〜19を順に繰り返す）。実際の順番は試行順の計画に合わせて変えてよい
+  function defaultCondFor(trial) {
+    return ((Math.max(1, trial) - 1) % CONDITION_COUNT) + 1;
+  }
+
+  function loadBackground(condNumber) {
+    const img = new Image();
+    img.onload = () => {
+      bgImg = img;
+      // キャンバスの大きさを背景画像に合わせる（縦横比が画像と同じになる）
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      canvas.style.aspectRatio = `${img.naturalWidth} / ${img.naturalHeight}`;
+      redraw();
+    };
+    img.onerror = () => {
+      statusEl.textContent = `背景画像が読めません: backgrounds/cond${String(condNumber).padStart(2, "0")}.png`;
+    };
+    img.src = `backgrounds/cond${String(condNumber).padStart(2, "0")}.png`;
+  }
+
+  // 線の大きさに応じた「つながっている」の基準（キャンバス上のpx）
+  function closeThresholdFor(points) {
+    const xs = points.map((p) => p.x * canvas.width);
+    const ys = points.map((p) => p.y * canvas.height);
+    const diagonalPx = Math.hypot(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+    return Math.max(CLOSE_THRESHOLD_PX, diagonalPx * 0.2);
+  }
+
+  function pxDistance(a, b) {
+    return Math.hypot((a.x - b.x) * canvas.width, (a.y - b.y) * canvas.height);
+  }
+
+  // 囲み（領域）を作る。線を端どうしでつないでいき、始点に戻ったものを1つの囲みとする。
+  // 1本の線で囲んでも、途中で切れた複数の線を組み合わせて囲んでもよい
+  // 戻り値: [{ members: [線の番号...], points: [{x,y}, ...] }]
+  function buildRegions() {
+    const used = new Array(strokes.length).fill(false);
+    const regions = [];
+    for (let i = 0; i < strokes.length; i++) {
+      if (used[i] || strokes[i].points.length < 2) continue;
+      let chain = strokes[i].points.slice();
+      const members = [i];
+      used[i] = true;
+      let closed = false;
+      while (true) {
+        const threshold = closeThresholdFor(chain);
+        if (chain.length >= 3 && pxDistance(chain[0], chain[chain.length - 1]) <= threshold) {
+          closed = true;
+          break;
+        }
+        // 今の端にいちばん近い、まだ使っていない線をつなぐ（向きも合わせる）
+        let attached = false;
+        for (let j = 0; j < strokes.length && !attached; j++) {
+          if (used[j] || strokes[j].points.length < 2) continue;
+          const pts = strokes[j].points;
+          const end = chain[chain.length - 1];
+          const dFirst = pxDistance(end, pts[0]);
+          const dLast = pxDistance(end, pts[pts.length - 1]);
+          if (dFirst <= threshold && dFirst <= dLast) {
+            chain = chain.concat(pts);
+            attached = true;
+          } else if (dLast <= threshold) {
+            chain = chain.concat(pts.slice().reverse());
+            attached = true;
+          }
+          if (attached) {
+            used[j] = true;
+            members.push(j);
+          }
+        }
+        if (!attached) break;
+      }
+      if (closed) {
+        regions.push({ members, points: chain });
+      } else {
+        // つながらなかった線は、囲みに使わない（後から別の線と組めるように戻す）
+        members.forEach((m) => { used[m] = false; });
+      }
+    }
+    return regions;
+  }
+
+  function redraw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (bgImg) ctx.drawImage(bgImg, 0, 0, canvas.width, canvas.height);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    // 囲みの内側は色で塗る（線より先に塗って、線が上に残るようにする）
+    for (const r of buildRegions()) {
+      tracePath(r.points, true);
+      ctx.fillStyle = FILL_COLOR;
+      ctx.fill();
+    }
+    for (const s of strokes) {
+      if (s.points.length < 2) continue;
+      tracePath(s.points, false);
+      // 線は背景のグレー・白いボール・黒いコントローラーと区別できる青にする
+      ctx.strokeStyle = STROKE_COLOR;
+      // 太さはキャンバスの幅に比例させる（画面に表示されたときの太さが、画像の大きさによらず一定になる）
+      ctx.lineWidth = canvas.width * STROKE_WIDTH_RATIO;
+      ctx.stroke();
+    }
+  }
+
+  function getNormalizedPoint(e) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (e.clientX - rect.left) / rect.width,
+      y: (e.clientY - rect.top) / rect.height,
+    };
+  }
+
+  canvas.addEventListener("pointerdown", (e) => {
+    canvas.setPointerCapture(e.pointerId);
+    const pt = getNormalizedPoint(e);
+    current = {
+      pointerType: e.pointerType, // "mouse" / "pen" / "touch"
+      points: [],
+      closed: false,              // 始点と終点がつながっているか（endStrokeで判定）
+      gapPx: null,                // 始点と終点の距離（キャンバスpx）
+    };
+    current.points.push({ ...pt, p: e.pressure || 0.5, t: Math.round(performance.now() - startTime) });
+    strokes.push(current);
+    redraw();
+  });
+
+  canvas.addEventListener("pointermove", (e) => {
+    if (!current) return;
+    // 同じ座標の連続記録を避ける
+    const pt = getNormalizedPoint(e);
+    const last = current.points[current.points.length - 1];
+    if (last && Math.abs(last.x - pt.x) < 1e-6 && Math.abs(last.y - pt.y) < 1e-6) return;
+    current.points.push({ ...pt, p: e.pressure || 0.5, t: Math.round(performance.now() - startTime) });
+    redraw();
+  });
+
+  function endStroke() {
+    if (current) {
+      redraw();
+      // この線が、どこかの囲みに入ったかで判定する（ほかの線と組み合わさって囲めた場合も含む）
+      const index = strokes.indexOf(current);
+      const inRegion = buildRegions().some((r) => r.members.includes(index));
+
+      if (inRegion) {
+        statusEl.textContent = "線がつながりました。";
+      } else {
+        statusEl.textContent = "まだつながっていません。始点に戻して描いてください。";
+      }
+    }
+    current = null;
+  }
+  canvas.addEventListener("pointerup", endStroke);
+  canvas.addEventListener("pointercancel", endStroke);
+
+  // 直前に記録した試行の図を読み込み、そのまま編集し直せるようにする（「次へ」で上書き保存）
+  document.getElementById("backBtn").addEventListener("click", () => {
+    const pid = currentParticipant();
+    const trials = ensureParticipant(pid).trials;
+    if (trials.length === 0) {
+      alert("戻れる記録がありません");
+      return;
+    }
+    if (strokes.length && !confirm("描いている内容は消えます。前の図を読み込みますか？")) return;
+
+    const last = trials[trials.length - 1];
+    trialInput.value = last.trialId;
+    condSelect.value = last.condition || defaultCondFor(last.trialId);
+    loadBackground(Number(condSelect.value));
+    // 記録をコピーして読み込む（編集しても、保存するまで記録は変わらない）
+    strokes = JSON.parse(JSON.stringify(last.strokes));
+    redraw();
+    resetStartTime();
+    statusEl.textContent = `試行${last.trialId}を編集中です。「次へ」で上書き保存します。`;
+  });
+
+  document.getElementById("undoBtn").addEventListener("click", () => {
+    strokes.pop();
+    redraw();
+  });
+
+  document.getElementById("clearBtn").addEventListener("click", () => {
+    if (strokes.length && !confirm("描いた内容を全て消しますか？")) return;
+    strokes = [];
+    redraw();
+    resetStartTime();
+  });
+
+  // ---- 試行の保存（参加者の記録に追加する。ファイルはまだ作らない） ----
+  document.getElementById("saveBtn").addEventListener("click", () => {
+    if (strokes.length === 0) {
+      alert("まだ何も描かれていません");
+      return;
+    }
+    // 「絶対に囲む」指定: 閉じていない線があれば保存しない
+    const regions = buildRegions();
+    const covered = new Set(regions.flatMap((r) => r.members));
+    const openCount = strokes.length - covered.size;
+    if (openCount > 0) {
+      alert("つながっていない線があります。");
+      return;
+    }
+
+    const pid = currentParticipant();
+    const trialId = Number(trialInput.value) || 1;
+    const participant = ensureParticipant(pid);
+
+    // 同じ試行番号が既にあれば、置き換えるかを確認する
+    const existing = participant.trials.findIndex((t) => t.trialId === trialId);
+    if (existing >= 0 && !confirm(`試行${trialId}は保存済みです。上書きしますか？`)) return;
+
+    const trial = {
+      trialId,
+      condition: Number(condSelect.value),
+      savedAt: new Date().toISOString(),
+      canvas: { width: canvas.width, height: canvas.height },
+      strokes,
+      // 囲み（線を組み合わせた領域）。分析では、こちらを優先して使う
+      regions: regions.map((r) => ({ members: r.members, points: r.points })),
+    };
+    if (existing >= 0) participant.trials[existing] = trial;
+    else participant.trials.push(trial);
+    participant.trials.sort((a, b) => a.trialId - b.trialId);
+    saveRecords();
+
+    // 次の試行に進める
+    const next = nextTrialFor(pid);
+    trialInput.value = next;
+    condSelect.value = defaultCondFor(next);
+    loadBackground(Number(condSelect.value));
+    strokes = [];
+    redraw();
+    resetStartTime();
+    statusEl.textContent = `記録しました（試行${trialId}）。`;
+  });
+
+  // ---- 参加者ごとのファイルを書き出す（1人分の全試行を1つのJSONにまとめる） ----
+  document.getElementById("exportBtn").addEventListener("click", () => {
+    const pid = currentParticipant();
+    const participant = ensureParticipant(pid);
+    if (participant.trials.length === 0) {
+      alert("この参加者の保存済みの試行がありません");
+      return;
+    }
+    const out = {
+      participantId: pid,
+      exportedAt: new Date().toISOString(),
+      trialCount: participant.trials.length,
+      trials: participant.trials,
+    };
+    const blob = new Blob([JSON.stringify(out, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${pid}_all_trials_${stamp}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    statusEl.textContent = `書き出しました（${participant.trials.length} 試行）。`;
+  });
+
+
+  // 参加者IDを変えたら、その参加者の続きの試行番号に切り替える
+  participantInput.addEventListener("change", () => {
+    const pid = currentParticipant();
+    const next = nextTrialFor(pid);
+    trialInput.value = next;
+    condSelect.value = defaultCondFor(next);
+    loadBackground(Number(condSelect.value));
+    strokes = [];
+    redraw();
+    resetStartTime();
+    statusEl.textContent = describeParticipant(pid);
+  });
+
+  condSelect.addEventListener("change", () => loadBackground(Number(condSelect.value)));
+  trialInput.addEventListener("change", () => {
+    condSelect.value = defaultCondFor(Number(trialInput.value));
+    loadBackground(Number(condSelect.value));
+  });
+
+  // 起動時: 現在の参加者の続きから始める
+  const startPid = currentParticipant();
+  const startNext = nextTrialFor(startPid);
+  trialInput.value = startNext;
+  condSelect.value = defaultCondFor(startNext);
+  loadBackground(Number(condSelect.value));
+  statusEl.textContent = describeParticipant(startPid);
+  redraw();
+  resetStartTime();
+})();
+</script>
+</body>
+</html>
