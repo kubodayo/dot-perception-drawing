@@ -156,16 +156,28 @@
     img.src = `backgrounds/cond${String(condNumber).padStart(2, "0")}.png`;
   }
 
-  // 線の大きさに応じた「つながっている」の基準（キャンバス上のpx）
+  // 「つながっている」の判定は、見た目どおりになるよう、キャンバスの内部解像度ではなく
+  // 画面に実際に表示されているサイズ（CSSピクセル）を基準にする。
+  // 内部解像度（canvas.width/height）は背景画像の大きさそのまま（例: 1600x800）なことがあり、
+  // 画面には縮小して表示される（CSSでmax-width指定）ため、内部解像度を基準にすると
+  // 画面上では見た目よりずっと厳しい基準になってしまう
+  function displaySizePx() {
+    const rect = canvas.getBoundingClientRect();
+    return { w: rect.width || canvas.width, h: rect.height || canvas.height };
+  }
+
+  // 線の大きさに応じた「つながっている」の基準（画面表示上のpx）
   function closeThresholdFor(points) {
-    const xs = points.map((p) => p.x * canvas.width);
-    const ys = points.map((p) => p.y * canvas.height);
+    const { w, h } = displaySizePx();
+    const xs = points.map((p) => p.x * w);
+    const ys = points.map((p) => p.y * h);
     const diagonalPx = Math.hypot(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
     return Math.max(CLOSE_THRESHOLD_PX, diagonalPx * 0.2);
   }
 
   function pxDistance(a, b) {
-    return Math.hypot((a.x - b.x) * canvas.width, (a.y - b.y) * canvas.height);
+    const { w, h } = displaySizePx();
+    return Math.hypot((a.x - b.x) * w, (a.y - b.y) * h);
   }
 
   // 囲み（領域）を作る。線を端どうしでつないでいき、始点に戻ったものを1つの囲みとする。
