@@ -46,7 +46,7 @@
 </header>
 
 <div id="instructions">
-  <p>コントローラーとドットのつながりを、線で囲んで描いてください。</p>
+  <p>コントローラーとドットの繋がりを、線で囲んで描いてください。</p>
   <p>線は途切れていてもかまいません。</p>
   <p>実際に振っていたときの感覚をもとに、できるだけ正確に描いてください。</p>
 </div>
@@ -369,9 +369,9 @@
       const inRegion = buildRegions().some((r) => r.members.includes(index));
 
       if (inRegion) {
-        statusEl.textContent = "線がつながりました。";
+        statusEl.textContent = "線が繋がりました。";
       } else {
-        statusEl.textContent = "まだつながっていません。始点に戻して描いてください。";
+        statusEl.textContent = "まだ繋がっていません。始点に戻して描いてください。";
       }
     }
     current = null;
@@ -423,7 +423,7 @@
     const covered = new Set(regions.flatMap((r) => r.members));
     const openCount = strokes.length - covered.size;
     if (openCount > 0) {
-      alert("つながっていない線があります。");
+      alert("繋がっていない線があります。");
       return;
     }
 
