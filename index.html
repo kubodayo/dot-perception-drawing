@@ -63,6 +63,11 @@
 
 <div id="status">線を描いてください。</div>
 
+<div id="doneMsg" style="display:none; margin:24px auto; max-width:640px; padding:24px; text-align:center; font-size:20px; line-height:1.8; color:#1a5; border:2px solid #1a5; border-radius:8px; background:#f2fbf6;">
+  すべての試行が終わりました。お疲れさまでした。<br>
+  「⬇ ファイルの書き出し」を押して保存してください。
+</div>
+
 <script>
 (() => {
   const canvas = document.getElementById("pad");
@@ -147,6 +152,23 @@
 
   // 撮影した条件の数（StimulusCapture: 19条件）
   const CONDITION_COUNT = 19;
+
+  // ---- 全試行の終了状態 ----
+  // CONDITION_COUNT試行(=1周)を保存し終えたら、次の条件に進ませず終了表示を出す。
+  let finished = false;
+  function isFinished(pid) {
+    return nextTrialFor(pid) > CONDITION_COUNT;
+  }
+  function setFinished(on) {
+    finished = on;
+    document.getElementById("doneMsg").style.display = on ? "block" : "none";
+    document.getElementById("canvasWrap").style.display = on ? "none" : "";
+    document.getElementById("instructions").style.display = on ? "none" : "";
+    document.getElementById("actions").style.display = on ? "none" : "";
+    // 書き出しは終了後も使えるように残し、それ以外の操作ボタンは止める
+    document.getElementById("clearBtn").disabled = on;
+    document.getElementById("backBtn").disabled = on;
+  }
 
   // ---- 条件の表示順をランダム化する ----
   // 参加者IDを種(シード)にした疑似乱数で19条件をシャッフルする。同じ参加者なら、
@@ -339,6 +361,7 @@
   }
 
   canvas.addEventListener("pointerdown", (e) => {
+    if (finished) return;
     canvas.setPointerCapture(e.pointerId);
     const pt = getNormalizedPoint(e);
     current = {
@@ -450,8 +473,16 @@
     participant.trials.sort((a, b) => a.trialId - b.trialId);
     saveRecords();
 
-    // 次の試行に進める
+    // 19試行(=1周)を終えたら、次の条件に進まず終了表示を出す
     const next = nextTrialFor(pid);
+    if (next > CONDITION_COUNT) {
+      strokes = [];
+      setFinished(true);
+      statusEl.textContent = `記録しました（試行${trialId}）。全${CONDITION_COUNT}試行が終わりました。`;
+      return;
+    }
+
+    // 次の試行に進める
     trialInput.value = next;
     condSelect.value = defaultCondFor(next);
     loadBackground(Number(condSelect.value));
@@ -489,6 +520,12 @@
   // 参加者IDを変えたら、その参加者の続きの試行番号に切り替える
   participantInput.addEventListener("change", () => {
     const pid = currentParticipant();
+    if (isFinished(pid)) {
+      setFinished(true);
+      statusEl.textContent = `この参加者は全${CONDITION_COUNT}試行が終わっています。`;
+      return;
+    }
+    setFinished(false);
     const next = nextTrialFor(pid);
     trialInput.value = next;
     condSelect.value = defaultCondFor(next);
@@ -507,13 +544,18 @@
 
   // 起動時: 現在の参加者の続きから始める
   const startPid = currentParticipant();
-  const startNext = nextTrialFor(startPid);
-  trialInput.value = startNext;
-  condSelect.value = defaultCondFor(startNext);
-  loadBackground(Number(condSelect.value));
-  statusEl.textContent = describeParticipant(startPid);
-  redraw();
-  resetStartTime();
+  if (isFinished(startPid)) {
+    setFinished(true);
+    statusEl.textContent = `この参加者は全${CONDITION_COUNT}試行が終わっています。書き出しで保存してください。`;
+  } else {
+    const startNext = nextTrialFor(startPid);
+    trialInput.value = startNext;
+    condSelect.value = defaultCondFor(startNext);
+    loadBackground(Number(condSelect.value));
+    statusEl.textContent = describeParticipant(startPid);
+    redraw();
+    resetStartTime();
+  }
 })();
 </script>
 </body>
