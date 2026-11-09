@@ -501,6 +501,34 @@
       alert("この参加者の保存済みの試行がありません");
       return;
     }
+
+    // ---- 書き出し前の検証 ----
+    // 条件1〜CONDITION_COUNTが「1回ずつ」揃っているかを確認し、欠落・重複・試行数の
+    // 異常があれば警告する（過去に、ある試行の条件が手動値のまま保存され、同じ条件が
+    // 2回・別の条件が0回になる不具合があったため、書き出し時に気づけるようにする）
+    const condCounts = {};
+    participant.trials.forEach((t) => {
+      condCounts[t.condition] = (condCounts[t.condition] || 0) + 1;
+    });
+    const missingConds = [];
+    const duplicatedConds = [];
+    for (let c = 1; c <= CONDITION_COUNT; c++) {
+      const n = condCounts[c] || 0;
+      if (n === 0) missingConds.push(c);
+      else if (n > 1) duplicatedConds.push(`${c}(${n}回)`);
+    }
+    const problems = [];
+    if (participant.trials.length !== CONDITION_COUNT) {
+      problems.push(`試行数が${participant.trials.length}です（正常は${CONDITION_COUNT}）`);
+    }
+    if (missingConds.length) problems.push(`出ていない条件: ${missingConds.join(", ")}`);
+    if (duplicatedConds.length) problems.push(`重複した条件: ${duplicatedConds.join(", ")}`);
+    if (problems.length &&
+        !confirm(`参加者「${pid}」のデータに問題がある可能性があります:\n\n・${problems.join("\n・")}\n\nこのまま書き出しますか？`)) {
+      statusEl.textContent = "書き出しを中止しました。条件を確認してください。";
+      return;
+    }
+
     const out = {
       participantId: pid,
       exportedAt: new Date().toISOString(),
